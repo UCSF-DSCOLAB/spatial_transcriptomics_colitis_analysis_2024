@@ -1,6 +1,6 @@
 # Single-cell spatial transcriptomics of fixed, paraffin-embedded biopsies reveals colitis-associated cell networks
 
-This repository contains the code necessary to reproduce the analyses and figures presented in our paper. Because we analyzed nine datasets (seven Xenium, one CosMx, and one MERSCOPE) and performed many analyses repeatedly across datasets, we provide generalized analysis pipelines for each major step. These pipelines can be applied directly to your own data or adapted for use with any of the datasets included in our study.
+This repository contains the code necessary to reproduce the analyses and figures presented in our paper. Because we analyzed nine spatial transcriptomics datasets (seven Xenium, one CosMx, and one MERSCOPE) and performed many analyses repeatedly across datasets, we provide generalized analysis pipelines for each major step. These pipelines can be applied directly to your own data or adapted for use with any of the datasets included in our study.
 
 Our team: Elvira Mennillo, Madison L. Lotstein, Gyehyun Lee, Julian Hou, Vrinda Johri, Donna E. Leet, Christina Ekstrand, Jessica Tsui, Jun Yan He6, Uma Mahadevan, Walter Eckalbar, David Y. Oh, Gabriela K. Fragiadakis, Michael G. Kattah, and Alexis J. Combes.
 
