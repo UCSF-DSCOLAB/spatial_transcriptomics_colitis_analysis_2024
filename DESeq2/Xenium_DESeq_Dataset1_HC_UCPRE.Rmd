@@ -1,0 +1,367 @@
+---
+title: "Xenium_DESeq2_Dataset1_HC_vs_UCPRE"
+---
+
+```{r}
+#not all libraries are required to run this rmd
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(ggpubr)
+library(ggrepel)
+library(gridExtra)
+library(matrixStats)
+library(patchwork)
+library(pheatmap)
+library(Seurat)
+library(RColorBrewer)
+library(reshape2)
+library(SeuratDisk)
+library(SeuratData)
+library(reticulate)
+library(cowplot)
+library(sceasy)
+library(biomaRt)
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+library(reshape2)
+library(fs) 
+library(tiledb)
+library(SeuratObject)
+library(tidyverse)
+library(anndata)
+library(DESeq2)  
+library(MAST) 
+library(zinbwave) 
+library(doParallel)
+library(forcats)
+library(Seurat)
+library(harmony)
+library(readxl)
+library(SingleCellExperiment)
+library(ComplexHeatmap)
+library(dplyr)
+library(RColorBrewer)
+library(circlize)
+library(ComplexHeatmap)
+library(fgsea)
+```
+
+
+
+#for Xenium we start from the h5ad file (this is specified for Dataset 1 and for the comparion between HC and UC PRE).We want to convert the h5ad file to a Seurat obj, first part to generate matrix files in the provided notebook named "first_steps_to_convert_h5ad_to_seurat.ipynb"
+
+##Next steps are in Rstudio with output files from "first_steps_to_convert_h5ad_to_seurat.ipynb"
+
+```{r}
+## in Rstudio
+
+Raw_data <- Read10X(data.dir = '/path/matrix_files')
+
+metadata <- read.csv('/path/metadata.csv', row.names = 1)
+
+#create seurat obj
+RNA_seurat <- CreateSeuratObject(counts = Raw_data, meta.data = metadata)
+
+```
+
+
+#ALL CELLS
+```{r}
+# Aggregate expression by "HS" category 
+RNA_seurat <- subset(RNA_seurat, X24_01_17_HS != "unassigned")
+cts_all <- AggregateExpression(
+    RNA_seurat,
+    group.by = "X24_01_17_HS",
+    assays = 'RNA',
+    slot = 'counts',
+    return.seurat = FALSE
+)
+
+# Extract the count matrix
+cts_all <- cts_all$RNA
+#
+colData_all <- data.frame(samples=colnames(cts_all))
+colData_all <- colData_all %>%
+  mutate(condition = case_when(
+    grepl('PRE', samples)  ~ 'PRE',
+    grepl('POST', samples) & grepl('R', samples) ~ 'POST_R',
+    grepl('POST', samples) & grepl('NR', samples) ~ 'POST_NR',
+    grepl('HC', samples) ~ 'HC'
+  ))
+rownames(colData_all) <- NULL
+colData_all <- column_to_rownames(colData_all, var='samples')
+```
+
+```{r}
+# Set the reference level
+colData_all$condition <- relevel(factor(colData_all$condition), ref = "HC")
+#CreateDESeq2 object
+dds_all<-DESeqDataSetFromMatrix(countData=cts_all,
+                       colData=colData_all,
+                       design = ~ condition)
+#filter
+keep<-rowSums(counts(dds_all)) >=1
+dds_all <-dds_all[keep,]
+```
+
+```{r}
+#Run DESeq()
+dds_all<- DESeq(dds_all)
+#Check the cofficiencts for the comparison
+resultsNames(dds_all)
+#Generate results object
+res_all <- results(dds_all, contrast=c("condition", "HC",  "PRE"))
+#write to csv file
+write.csv(res_all, file = "res_all.csv")
+```
+
+```{r}
+head(res_all)
+```
+
+```{r}
+res_all.df <- as.data.frame(res_all)
+res_all.df <- res_all.df[(abs(res_all.df$log2FoldChange) > 0.5) & 
+                         (res_all.df$padj < 0.1),]
+mat <-counts(dds_all, normalized=T)[rownames(res_all.df),]
+mat.z<-t(apply(mat,1,scale))
+colnames(mat.z)<- rownames(colData)
+mat.z
+Heatmap(mat.z,cluster_rows=T,cluster_columns=T, column_labels=colnames(mat.z),name="Z-score")
+```
+
+#Heatmap_for_target_genes_after_DESeq2_note: I renamed RNA_Seurat sobj and added a metadata column loading the csv file named "24_04_13_HC_PRE_POST.csv"
+
+```{r}
+###Renamed the RNA_seurat to sobj
+sobj <- RNA_seurat
+#add this category to combine PRE and POST from R and NR
+sc_cell_info <- read.csv("/path/24_04_13_HC_PRE_POST.csv", header = T) #csv file provided
+colnames(sc_cell_info)[1] <- "cell_ID"
+head(sc_cell_info)
+# add Sample metadata to the sobj[[]] slot
+sobj[['X24_04_13_HC_PRE_POST']] <- sc_cell_info$X24_04_13_HC_PRE_POST[match(rownames(sobj@meta.data), sc_cell_info$cell_ID)]
+```
+
+```{r}
+raw_counts <- sobj@assays$RNA@layers$counts
+total_raw_counts <- colSums(raw_counts)
+hist(total_raw_counts, breaks=50, main="Total Raw Counts Distribution", xlab="Total Counts", ylab="Number of Cells")
+```
+
+```{r}
+sobj <- NormalizeData(sobj)
+```
+
+```{r}
+normalized_data <- sobj@assays$RNA@layers$data
+total_normalized_counts <- colSums(normalized_data)
+hist(total_normalized_counts, breaks=50, main="Total Normalized Counts Distribution", xlab="Total Expression", ylab="Number of Cells")
+```
+
+```{r}
+#subset obj 
+sobj_subset <- subset(sobj, subset = X24_04_13_HC_PRE_POST %in% c('HC', 'PRE'))
+```
+
+```{r}
+unique_values <- unique(sobj_subset@meta.data$X24_01_17_HS)
+print(unique_values)
+```
+
+```{r}
+# Define genes to plot
+genes_to_plot <- c('AQP8',
+'GUCA2A',
+'SLC26A2',
+'LYPD8',
+'BEST4',
+'OTOP2',
+'DDC',
+'CA7',
+'TRPM5',
+'FABP1',
+'JUN',
+'FABP2',
+'PHGR1',
+'CLDN5',
+'LGALS4',
+'PIGR',
+'TREM2',
+'DUSP1',
+'C15orf48',
+'MS4A8',
+'EPCAM',
+'IL32',
+'C7',
+'KRT8','NOS2',
+'PECAM1',
+'CLU',
+'SSR4',
+'PTPRC',
+'IL7R',
+'TRAC',
+'BASP1',
+'COL1A1',
+'ALOX5',
+'MRC1',
+'TCF4',
+'FCER1G',
+'VWF',
+'CD1D',
+'CD44',
+'OSMR',
+'MEF2C',
+'LTB',
+'SELL',
+'PTGDS',
+'JAK3',
+'MZB1',
+'BANK1',
+'CD19',
+'C3',
+'CD79A',
+'TIMP1',
+'S100A9',
+'MS4A1',
+'IGHD','S100A8')
+up_genes <- c('AQP8',
+'GUCA2A',
+'SLC26A2',
+'LYPD8',
+'BEST4',
+'OTOP2',
+'DDC',
+'CA7',
+'TRPM5',
+'FABP1',
+'JUN',
+'FABP2',
+'PHGR1',
+'CLDN5',
+'LGALS4',
+'PIGR',
+'TREM2',
+'DUSP1',
+'C15orf48',
+'MS4A8',
+'EPCAM',
+'IL32',
+'C7',
+'KRT8')
+down_genes <- c('PECAM1',
+'CLU',
+'SSR4',
+'PTPRC',
+'IL7R',
+'TRAC',
+'BASP1',
+'COL1A1',
+'ALOX5',
+'MRC1',
+'TCF4',
+'FCER1G',
+'VWF',
+'CD1D',
+'CD44',
+'OSMR',
+'MEF2C',
+'NOS2',
+'LTB',
+'SELL',
+'PTGDS',
+'JAK3',
+'MZB1',
+'BANK1',
+'CD19',
+'C3',
+'CD79A',
+'TIMP1',
+'S100A9',
+'MS4A1',
+'IGHD',
+'S100A8')
+gene_status <- c(rep('Up', length(up_genes)), rep('Down', length(down_genes)))
+names(gene_status) <- c(up_genes, down_genes)
+
+```
+
+```{r}
+# Prepare the color for the row annotation bar
+row_anno_colors <- ifelse(gene_status == "Up", "white", "white")
+# Create a data.frame to hold this information
+anno_df <- data.frame(status = gene_status, stringsAsFactors = FALSE)
+rownames(anno_df) <- names(gene_status)
+```
+
+
+```{r}
+# Create the heatmap row annotation
+ha <- rowAnnotation(status = anno_block(gp = gpar(fill = row_anno_colors), width = unit(2, "mm"), labels = NULL))
+```
+
+```{r}
+# Calculate averages across single-cells for each sample
+avg_exp = AverageExpression(sobj_subset, assays = "RNA", slot = "data", features = genes_to_plot, group.by = "X24_01_17_HS")
+```
+
+```{r}
+# Calculate z-scores
+            avg_exp = apply(avg_exp$RNA, 1, scale) %>% t() %>% as.data.frame() %>% setNames(colnames(avg_exp$RNA))
+```
+
+```{r}
+# Define the status
+sample_status = c("HS31_HC" = "HC", "HS33_HC" = "HC", "HS35_HC" = "HC", "HS37_HC" = "HC", "HS39_HC" = "HC", "HS40_HC" = "HC", "HS41_HC" = "HC", "HS42_HC" = "HC",  "HS43_HC" = "HC","HS32_PRE_VDZ_R" = "PRE",  "HS34_PRE_VDZ_R" = "PRE", "HS36_PRE_VDZ_R" = "PRE",  "HS38_PRE_VDZ_R" = "PRE", "HS44_PRE_VDZ_R" = "PRE", "HS46__PRE_VDZ_NR" = "PRE",  "HS48_PRE_VDZ_NR" = "PRE", "HS50_PRE_VDZ_NR" = "PRE")
+```
+
+```{r}
+avg_exp_matrix = as.matrix(avg_exp)
+# Define custom color scale
+breaks = c(-1, 0, 1)  # Explicitly set the min-mid-max values
+colors = c("blue", "white", "red")  # Corresponding colors
+color_scale = colorRamp2(breaks, colors)
+```
+
+```{r}
+# Generate heatmap with ComplexHeatmap
+pseudobulk_heatmap = Heatmap(avg_exp_matrix,
+                             name = "z-score",
+                             col = color_scale,
+                             column_split = sample_status[colnames(avg_exp)],
+                             row_split = gene_status[rownames(avg_exp_matrix)],
+                             show_column_names = T,
+                             show_row_names = T,
+                             border = "black",
+                             rect_gp = gpar(col = "black", lwd = 0.5), # Adds a border to each cell
+                             row_names_gp = grid::gpar(fontsize = 4, fontface = "italic"),
+                             column_names_gp = grid::gpar(fontsize = 4),
+                             column_title_gp = grid::gpar(fontsize = 4),
+                             #row_km = 2,
+                             cluster_rows=T,
+                             cluster_columns=T,
+                             column_title_rot = 30,  # rotate column names by 90 degrees
+                             heatmap_legend_param = list
+                              (title_gp = gpar(fontsize = 4, fontface = "plain"),
+                                labels_gp = gpar(fontsize = 4)), 
+                             row_title = NULL,  # To remove the default row title since we have italicized the rownames
+                             width = ncol(avg_exp_matrix)*unit(1.5, "mm"), 
+                             height = nrow(avg_exp_matrix)*unit(1.5, "mm"),
+                             #right_annotation = ha
+                             )
+```
+
+```{r}
+# Save the heatmap
+pdf("Xenium_heatmap_avgexp.pdf")
+draw(pseudobulk_heatmap)
+dev.off()
+
+# Display heatmap (without saving)
+draw(pseudobulk_heatmap)
+
+
+#Write a csv file of avg_exp_matrix for source data
+write.csv(avg_exp_matrix,"Xenium_heatmap_data.csv", row.names = TRUE)
+```

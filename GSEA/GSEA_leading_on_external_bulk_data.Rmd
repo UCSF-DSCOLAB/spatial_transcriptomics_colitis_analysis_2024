@@ -1,0 +1,267 @@
+
+---
+title: "NR vs R: limma + fgsea + leading-edge (RES)_on_GSE73661"
+#data downloaded from GEO "GSE73661" and generated matrix for this specific analysis looking at NR_vs_R before vedolizumab treatment. Matrix data exported only for selected patients. Data and metadata files provided: "R_NR_W0.csv" and "metadata_R_NR.csv"
+
+
+```{r setup, include=FALSE}
+set.seed(1234)
+```
+
+```{r}
+#Load libraries
+
+library(limma)
+library(hugene10sttranscriptcluster.db)
+library(AnnotationDbi)
+library(fgsea)
+
+library(ggplot2)
+library(pheatmap)
+library(ggrepel)
+library(ggnewscale)
+
+library(dplyr)
+library(tibble)
+library(data.table)
+```
+
+```{r}
+#Input paths 
+exprs_path <- "/path/R_NR_W0.csv"
+meta_path  <- "/path/metadata_R_NR.csv"
+out_dir    <- "/path"
+
+#Load expression (rows = probes, cols = samples)
+exprs <- read.csv(exprs_path, row.names = 1, check.names = FALSE)
+message("Expression dim: ", paste(dim(exprs), collapse = " x "))
+
+#Load metadata (rows = samples)
+colData <- read.csv(meta_path, row.names = 1, check.names = FALSE)
+# ensure 'condition' exists and is a factor with levels NR/R or R/NR
+if (!"condition" %in% colnames(colData)) stop("metadata must contain a 'condition' column.")
+colData$condition <- factor(colData$condition)
+
+#Align columns (exprs) to rows (colData)
+common_samples <- intersect(colnames(exprs), rownames(colData))
+exprs <- exprs[, common_samples, drop = FALSE]
+colData <- colData[common_samples, , drop = FALSE]
+
+stopifnot(identical(colnames(exprs), rownames(colData)))
+```
+
+
+```{r}
+# Map Affy probe IDs to symbols
+affy_ids <- rownames(exprs)
+gene_symbols <- mapIds(
+  hugene10sttranscriptcluster.db,
+  keys = affy_ids, keytype = "PROBEID",
+  column = "SYMBOL",
+  multiVals = "first"
+)
+
+exprs$GeneSymbol <- gene_symbols
+exprs <- exprs[!is.na(exprs$GeneSymbol) & exprs$GeneSymbol != "", ]
+
+# Aggregate duplicate symbols by mean
+exprs_agg <- exprs %>%
+  as_tibble(rownames = "Probe") %>%
+  select(-Probe) %>%
+  group_by(GeneSymbol) %>%
+  summarise(across(everything(), mean, na.rm = TRUE), .groups = "drop") %>%
+  as.data.frame()
+
+rownames(exprs_agg) <- exprs_agg$GeneSymbol
+exprs_agg$GeneSymbol <- NULL
+
+message("Aggregated dim (symbols x samples): ", paste(dim(exprs_agg), collapse = " x "))
+```
+
+```{r}
+design <- model.matrix(~ 0 + condition, data = colData)
+colnames(design) <- sub("^condition", "", colnames(design))  
+
+fit <- lmFit(exprs_agg, design)
+contrast.matrix <- makeContrasts(NR_R = NR - R, levels = design)  
+fit2 <- eBayes(contrasts.fit(fit, contrast.matrix))
+
+results <- topTable(fit2, number = Inf, sort.by = "P", adjust.method = "fdr")
+results$GeneSymbol <- rownames(results)
+
+deg_path <- file.path(out_dir, "DEG_results_limma_NR_vs_R.csv")
+write.csv(results, deg_path, row.names = FALSE)
+
+head(results)
+
+```
+
+```{r}
+# Gene_signatures
+custom_gene_sets <- list(
+  GeneSet_R = c(
+    "AQP8","CA4","FABP1","GUCA2A","LGALS4","ITLN1","GPR15","SLC26A2","SPINK4","WFDC2",
+    "MUC2","C15orf48","LEFTY1","SPINK1","EPCAM","AGR2","PIGR","FABP2","ADAMDEC1",
+    "DDC","ITM2C","S100A16","KRT8","MUC1","CEACAM6","NOS2","SELENOP","TMEM176B",
+    "TMEM176A","NUPR1"
+  ),
+  GeneSet_IAF_Monocyte_Neutrophil = c(
+    "IL1R1","TIMP1","CD44","IL13RA2","MMP1","MMP3","OSMR","NFKBIA","TNFAIP3",
+    "S100A8","S100A9","FCGR3B","CSF3R","BASP1","OSM","VCAN","LYZ","TNFRSF11B",
+    "CD14","HLA-DRA","HLA-DRB1","TREM1"
+  ),
+  GeneSet_GALT_B_DC_S4_fibroblast = c(
+    "CD19","MS4A1","BANK1","SELL","CD79A","CCR7","LTB","C3",
+    "TNFSF13B","IRF8","PTGDS","CD1C","HLA-DRA","CD86","ITGAX",
+    "FCER1A","CLEC10A","CD1D","CLEC9A","XCR1","FLT3","HLA-DRB1",
+    "CD40","CD209","LAMP3"
+  )
+)
+
+```
+
+```{r}
+gene_list <- results$logFC
+names(gene_list) <- results$GeneSymbol
+gene_list_sorted <- sort(gene_list, decreasing = TRUE)
+
+```
+
+
+```{r}
+fgsea_res <- fgsea(
+  pathways = custom_gene_sets,
+  stats    = gene_list_sorted,
+  minSize  = 10,
+  maxSize  = 500,
+  nperm    = 1000
+)
+
+fgsea_tbl <- as_tibble(fgsea_res) %>%
+  mutate(leadingEdge = vapply(leadingEdge, paste, collapse = ", ", character(1))) %>%
+  arrange(padj, desc(NES))
+
+fgsea_path <- file.path(out_dir, "fgsea_results_NR_vs_R.csv")
+write.csv(fgsea_tbl, fgsea_path, row.names = FALSE)
+
+head(fgsea_tbl)
+
+```
+
+```{r}
+calc_running_score <- function(stats, pathway_genes, p = 1) {
+  stats <- stats[!is.na(stats)]
+  N  <- length(stats)
+  hits <- names(stats) %in% pathway_genes
+  Nh <- sum(hits); Nm <- N - Nh
+  if (Nh == 0L || Nm == 0L) return(setNames(rep(NA_real_, N), names(stats)))
+  weights <- abs(stats)^p
+  denom <- sum(weights[hits])
+  if (!is.finite(denom) || denom == 0) return(setNames(rep(NA_real_, N), names(stats)))
+  weights <- weights / denom
+  running_score <- cumsum(ifelse(hits, weights, -1 / Nm))
+  names(running_score) <- names(stats)
+  running_score
+}
+
+deg_padj_map <- setNames(results$adj.P.Val, results$GeneSymbol)
+
+leading_edge_rows <- lapply(seq_len(nrow(fgsea_res)), function(i) {
+  pathway_name  <- fgsea_res$pathway[i]
+  pathway_genes <- custom_gene_sets[[pathway_name]]
+  ES            <- fgsea_res$ES[i]
+  NES           <- fgsea_res$NES[i]
+  padj_pathway  <- fgsea_res$padj[i]
+  le_genes      <- fgsea_res$leadingEdge[[i]]
+
+  rs <- calc_running_score(gene_list_sorted, pathway_genes)
+
+  data.frame(
+    pathway      = pathway_name,
+    gene         = le_genes,
+    log2FC       = gene_list_sorted[le_genes],
+    padj_gene    = deg_padj_map[le_genes],
+    ES           = ES,
+    NES          = NES,
+    RES          = rs[le_genes],
+    contribution = gene_list_sorted[le_genes] * NES,
+    padj_pathway = padj_pathway,
+    stringsAsFactors = FALSE
+  )
+})
+
+leading_edge_df <- bind_rows(leading_edge_rows) %>%
+  arrange(pathway, dplyr::desc(abs(contribution)))
+
+le_path <- file.path(out_dir, "fgsea_leadingEdge_RES_NR_vs_R.csv")
+write.csv(leading_edge_df, le_path, row.names = FALSE)
+
+head(leading_edge_df)
+```
+
+
+#heatmaps
+```{r}
+
+# Define signature groups
+red_sigs  <- c("GeneSet_GALT_B_DC_S4_fibroblast", "GeneSet_IAF_Monocyte_Neutrophil")
+blue_sigs <- c("GeneSet_R")
+
+# Keep gene order consistent
+gene_order <- leading_edge_df %>%
+  group_by(gene) %>%
+  summarise(mean_contrib = mean(contribution, na.rm = TRUE)) %>%
+  arrange(desc(mean_contrib)) %>%
+  pull(gene)
+
+# Red signatures plot
+
+tile_red <- leading_edge_df %>%
+  filter(pathway %in% red_sigs) %>%
+  mutate(gene = factor(gene, levels = gene_order),
+         pathway = factor(pathway, levels = red_sigs))
+
+p_red <- ggplot(tile_red, aes(y = pathway, x = gene, fill = contribution)) +
+  geom_tile(color = "grey90") +  # tiles only, no labels inside
+  scale_fill_gradient(low = "white", high = "red", name = "Contribution") +
+  theme_bw(base_size = 12) +
+  labs(title = "Leading-edge Contributions: Red Signatures",
+       y = "Signature", x = "Gene") +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 10, face = "bold"),
+    axis.text.y = element_text(size = 12, face = "bold"),
+    panel.grid = element_blank()
+  )
+
+print(p_red)
+ggsave(file.path(out_dir, "TileHeatmap_RedSignatures_noTileLabels.png"),
+       p_red, width = 12, height = 3, dpi = 300, bg = "white")
+
+
+# Blue signature plot
+
+tile_blue <- leading_edge_df %>%
+  filter(pathway %in% blue_sigs) %>%
+  mutate(gene = factor(gene, levels = gene_order),
+         pathway = factor(pathway, levels = blue_sigs))
+
+p_blue <- ggplot(tile_blue, aes(y = pathway, x = gene, fill = contribution)) +
+  geom_tile(color = "grey90") +  # tiles only, no labels inside
+  scale_fill_gradient(low = "white", high = "blue", name = "Contribution") +
+  theme_bw(base_size = 12) +
+  labs(title = "Leading-edge Contributions: Blue Signature",
+       y = "Signature", x = "Gene") +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 10, face = "bold"),
+    axis.text.y = element_text(size = 12, face = "bold"),
+    panel.grid = element_blank()
+  )
+
+print(p_blue)
+ggsave(file.path(out_dir, "TileHeatmap_BlueSignature_noTileLabels.png"),
+       p_blue, width = 8, height = 2.3, dpi = 300, bg = "white")
+
+```
+
