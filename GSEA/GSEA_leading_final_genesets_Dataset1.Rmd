@@ -1,0 +1,428 @@
+---
+title: "GSEA_on_combined_Dataset1_looking_UC_PRE_R_vs_NR_before_vedolizumab_treatment"
+---
+
+```{r}
+#not all libraries are required to run this rmd
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(ggpubr)
+library(ggrepel)
+library(gridExtra)
+library(matrixStats)
+library(patchwork)
+library(pheatmap)
+library(Seurat)
+library(RColorBrewer)
+library(reshape2)
+library(SeuratDisk)
+library(SeuratData)
+library(reticulate)
+library(cowplot)
+library(sceasy)
+library(biomaRt)
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+library(reshape2)
+library(fs) 
+library(tiledb)
+library(SeuratObject)
+library(tidyverse)
+library(anndata)
+library(DESeq2)  
+library(MAST) 
+library(zinbwave) 
+library(doParallel)
+library(forcats)
+library(Seurat)
+library(harmony)
+library(readxl)
+library(SingleCellExperiment)
+library(ComplexHeatmap)
+library(dplyr)
+library(RColorBrewer)
+library(circlize)
+library(ComplexHeatmap)
+library(fgsea)
+```
+
+
+
+#for Xenium we start from the h5ad file (this is specified for Dataset 1).We want to convert the h5ad file to a Seurat obj, first part to generate matrix files in the notebook named "first_steps_to_convert_h5ad_to_seurat.ipynb"
+
+##Next steps are in Rstudio with output files from "first_steps_to_convert_h5ad_to_seurat.ipynb"
+
+```{r}
+## in Rstudio
+
+Raw_data <- Read10X(data.dir = '/path/matrix_files')
+
+metadata <- read.csv('/path/metadata.csv', row.names = 1)
+
+#create seurat obj
+RNA_seurat <- CreateSeuratObject(counts = Raw_data, meta.data = metadata)
+
+```
+
+```{r}
+sobj <- RNA_seurat
+```
+
+
+#ALL CELLS
+```{r}
+# Aggregate expression by "HS" 
+RNA_seurat <- subset(RNA_seurat, X24_01_17_HS != "unassigned")
+cts_all <- AggregateExpression(
+    RNA_seurat,
+    group.by = "X24_01_17_HS",  # removed Fine_annotation_3
+    assays = 'RNA',
+    slot = 'counts',
+    return.seurat = FALSE
+)
+
+```
+
+```{r}
+# cts_all should now be a dgCMatrix
+cts_all <- cts_all$RNA
+
+# Create a data frame for column data
+colData_all <- data.frame(samples = colnames(cts_all))
+
+# Use dplyr to mutate the data frame with correct patterns
+library(dplyr)
+colData_all <- colData_all %>%
+  mutate(condition = case_when(
+    grepl('PRE-VDZ-R', samples) ~ 'UCPRE_R_VDZ',
+    grepl('POST-VDZ-R', samples) ~ 'UCPOST_R_VDZ',
+    grepl('PRE-VDZ-NR', samples) ~ 'UCPRE_NR_VDZ',
+    grepl('POST-VDZ-NR', samples) ~ 'UCPOST_NR_VDZ',
+    grepl('HC', samples) ~ 'HC',
+    TRUE ~ 'NA'  # Default case
+  ))
+
+
+# View the resulting data frame
+View(colData_all)
+```
+
+```{r}
+#perform DESeq2 UCPRE_NR_VDZ_vs_UCPRE_R_VDZ
+# Set the reference level to UCPRE_R_VDZ
+library(DESeq2)
+colData_all$condition <- relevel(factor(colData_all$condition), ref = "UCPRE_R_VDZ")
+#CreateDESeq2 object
+dds_all<-DESeqDataSetFromMatrix(countData=cts_all,
+                       colData=colData_all,
+                       design = ~ condition)
+#filter
+keep<-rowSums(counts(dds_all)) >=1
+dds_all <-dds_all[keep,]
+#Run DESeq()
+dds_all<- DESeq(dds_all)
+#Check the coefficients for the comparison
+resultsNames(dds_all)
+#Generate results object
+res_all <- results(dds_all, contrast=c("condition", "UCPRE_NR_VDZ",  "UCPRE_R_VDZ"))
+```
+
+
+```{r}
+# Example custom gene sets
+#removed gene not present in Dataset 3 plex (TFF, CST3, FCN1)
+custom_gene_sets <- list(
+  GeneSet_R = c(
+    "AQP8", "CA4", "FABP1", "GUCA2A", "LGALS4", "ITLN1", "GPR15", "SLC26A2", "SPINK4", "WFDC2",
+    "MUC2", "C15orf48", "LEFTY1", "SPINK1", "EPCAM", "AGR2", "PIGR", "FABP2", "ADAMDEC1",
+    "DDC", "ITM2C", "S100A16", "KRT8", "MUC1", "CEACAM6", "NOS2", "SELENOP", "TMEM176B",
+    "TMEM176A", "NUPR1"
+  ),
+  GeneSet_IAF_Monocyte_Neutrophil = c(
+    "IL1R1", "TIMP1", "CD44", "IL13RA2", "MMP1", "MMP3", "OSMR", "NFKBIA", "TNFAIP3",
+    "S100A8", "S100A9", "FCGR3B", "CSF3R", "BASP1", "OSM", "VCAN", "LYZ", "TNFRSF11B",
+    "CD14", "HLA-DRA", "HLA-DRB1", "TREM1"
+  ),
+  GeneSet_GALT_B_DC_S4_fibroblast = c(
+    "CD19", "MS4A1", "BANK1", "SELL", "CD79A", "CCR7", "LTB", "C3",
+    "TNFSF13B", "IRF8", "PTGDS", "CD1C", "HLA-DRA", "CD86", "ITGAX",
+    "FCER1A", "CLEC10A", "CD1D", "CLEC9A", "XCR1", "FLT3", "HLA-DRB1",
+    "CD40", "CD209", "LAMP3"
+  )
+)
+```
+
+```{r}
+#using DEseq Results
+# Extract results, here using an example contrast
+#res <- results(dds_all, contrast = c("condition", "UCPRE_NR_VDZ", "UCPRE_R_VDZ"))
+gene_list <- res_all$log2FoldChange
+names(gene_list) <- rownames(res_all)
+gene_list_sorted <- sort(gene_list, decreasing = TRUE)  
+
+# Check the preparation
+head(gene_list_sorted)
+```
+
+
+
+```{r}
+# Run GSEA with custom gene sets
+fgsea_results <- fgsea(pathways = custom_gene_sets,
+                       stats = gene_list_sorted,
+                       minSize = 10,  # Minimum size of gene set to consider
+                       maxSize = 500,  # Maximum size of gene set to consider
+                       nperm = 1000)
+
+# Viewing results
+head(fgsea_results)
+
+fgsea_results_to_save <- fgsea_results
+
+# Collapse the list-column into a single string per row
+fgsea_results_to_save$leadingEdge <- sapply(fgsea_results$leadingEdge, function(x) paste(x, collapse = ", "))
+
+# Now write to CSV
+write.csv(fgsea_results_to_save, "fgsea_results.csv", row.names = FALSE)
+
+```
+
+```{r}
+pdf("GeneSet_R_enrichment_plot.pdf", width = 7, height = 5)
+
+plotEnrichment(
+  pathway = custom_gene_sets[["GeneSet_R"]],
+  stats = gene_list_sorted
+)
+
+dev.off()
+
+```
+
+
+```{r}
+pdf("GeneSet_IAF_Monocyte_Neutrophil_enrichment_plot.pdf", width = 7, height = 5)
+
+plotEnrichment(
+  pathway = custom_gene_sets[["GeneSet_IAF_Monocyte_Neutrophil"]],
+  stats = gene_list_sorted
+)
+
+dev.off()
+
+```
+
+```{r}
+pdf("GeneSet_GALT_B_DC_S4_fibroblast_plot.pdf", width = 7, height = 5)
+
+plotEnrichment(
+  pathway = custom_gene_sets[["GeneSet_GALT_B_DC_S4_fibroblast"]],
+  stats = gene_list_sorted
+)
+
+dev.off()
+```
+
+
+```{r}
+plotGseaTable(
+  pathways = custom_gene_sets,
+  stats = gene_list_sorted,
+  fgseaRes = fgsea_results
+)
+
+```
+
+```{r}
+# rlog transform
+vsd <- rlog(dds_all, blind = FALSE)
+mat <- assay(vsd)
+
+# Define your custom gene set (combine R and GeneSet_IAF_Monocyte_Neutrophil, GALT_B_DC_S4_fibroblast)
+genes_to_plot <- unique(c(custom_gene_sets[["GeneSet_R"]], custom_gene_sets[["GeneSet_IAF_Monocyte_Neutrophil"]],custom_gene_sets[["GeneSet_GALT_B_DC_S4_fibroblast"]] ))
+
+# Keep only genes present in your dataset
+genes_to_plot <- genes_to_plot[genes_to_plot %in% rownames(mat)]
+
+# Filter samples to two conditions
+target_conditions <- c("UCPRE_R_VDZ", "UCPRE_NR_VDZ")
+selected_samples <- colData_all %>% filter(condition %in% target_conditions)
+
+# Subset expression matrix and annotation
+mat_sub <- mat[genes_to_plot, selected_samples$samples, drop = FALSE]
+ann_col <- data.frame(Condition = selected_samples$condition)
+rownames(ann_col) <- selected_samples$samples
+
+pdf("custom_geneSet_heatmap.pdf", width = 8, height = 10)
+
+pheatmap(mat_sub,
+         scale = "row",
+         annotation_col = ann_col,
+         clustering_method = "complete",
+         show_rownames = TRUE,
+         fontsize_row = 4,
+         fontsize_col = 6,
+         color = colorRampPalette(rev(brewer.pal(n = 9, name = "RdBu")))(100),
+         main = "Custom GeneSet_R + GeneSet_NR Expression + GeneSet_GALT_B_DC_S4_fibroblast")
+
+dev.off()
+
+```
+
+
+```{r}
+library(ggplot2)
+pdf("GSEA_NES_plot.pdf", width = 8, height = 6)
+
+ggplot(fgsea_results, aes(x = reorder(pathway, NES), y = NES, fill = padj < 0.05)) +
+  geom_col() +
+  coord_flip() +
+  scale_fill_manual(values = c("TRUE" = "red", "FALSE" = "grey")) +
+  labs(title = "GSEA Normalized Enrichment Scores", x = "", y = "NES") +
+  theme_minimal()
+
+dev.off()
+
+```
+
+```{r}
+leading_edge_genes <- unique(unlist(fgsea_results$leadingEdge))
+leading_edge_genes <- leading_edge_genes[leading_edge_genes %in% rownames(assay(vsd))]
+
+mat_sub <- assay(vsd)[leading_edge_genes, selected_samples$samples]
+
+pdf("leading_edge_genes_heatmap.pdf", width = 8, height = 10)
+
+pheatmap(mat_sub,
+         scale = "row",
+         annotation_col = ann_col,
+         show_rownames = TRUE,
+         fontsize_row = 8,
+         fontsize_col = 6,
+         main = "Leading Edge Genes")
+
+dev.off()
+
+```
+
+```{r}
+# Set output directory
+out_dir <- "/path/"
+```
+
+```{r}
+# Compute true running enrichment score (RES) for leading-edge genes
+
+calc_running_score <- function(stats, pathway_genes, p = 1) {
+  stats <- stats[!is.na(stats)]
+  N  <- length(stats)
+  hits <- names(stats) %in% pathway_genes
+  Nh <- sum(hits); Nm <- N - Nh
+  weights <- abs(stats)^p
+  weights <- weights / sum(weights[hits])
+  running_score <- cumsum(ifelse(hits, weights, -1 / Nm))
+  names(running_score) <- names(stats)
+  running_score
+}
+
+# Build table with true RES
+res_df <- as.data.frame(res_all); res_df$gene <- rownames(res_df)
+
+leading_edge_values <- lapply(seq_len(nrow(fgsea_results)), function(i) {
+  pathway_name   <- fgsea_results$pathway[i]
+  pathway_genes  <- custom_gene_sets[[pathway_name]]        
+  leading_genes  <- fgsea_results$leadingEdge[[i]]
+  NES            <- fgsea_results$NES[i]
+  padj_pathway   <- fgsea_results$padj[i]
+  ES             <- fgsea_results$ES[i]
+
+  rs <- calc_running_score(gene_list_sorted, pathway_genes)
+
+  df <- data.frame(
+    pathway       = pathway_name,
+    gene          = leading_genes,
+    log2FC        = gene_list_sorted[leading_genes],
+    padj          = res_df$padj[match(leading_genes, res_df$gene)],
+    NES           = NES,
+    ES            = ES,
+    RES           = rs[leading_genes],           
+    contribution  = gene_list_sorted[leading_genes] * NES,
+    padj_pathway  = padj_pathway,
+    stringsAsFactors = FALSE
+  )
+  df
+})
+
+leading_edge_values_df <- dplyr::bind_rows(leading_edge_values)
+```
+
+```{r}
+# Prepare data
+
+tile_df <- leading_edge_values_df %>%
+  select(pathway, gene, contribution)
+
+# Order genes by average contribution
+gene_order <- tile_df %>%
+  group_by(gene) %>%
+  summarise(mean_contrib = mean(contribution, na.rm = TRUE)) %>%
+  arrange(desc(mean_contrib)) %>%
+  pull(gene)
+
+tile_df$gene <- factor(tile_df$gene, levels = gene_order)
+
+# Custom order for gene signatures
+red_sigs  <- c("GeneSet_GALT_B_DC_S4_fibroblast", "GeneSet_IAF_Monocyte_Neutrophil")
+blue_sigs <- c("GeneSet_R")
+
+
+# Red signatures plot
+
+tile_red <- tile_df %>%
+  filter(pathway %in% red_sigs) %>%
+  mutate(gene = factor(gene, levels = gene_order),
+         pathway = factor(pathway, levels = red_sigs))
+
+p_red <- ggplot(tile_red, aes(y = pathway, x = gene, fill = contribution)) +
+  geom_tile(color = "grey90") +
+  scale_fill_gradient(low = "white", high = "red", name = "Contribution") +
+  theme_bw(base_size = 12) +
+  labs(title = "Leading-edge Contributions: Red Signatures",
+       y = "Signature", x = "Gene") +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 10, face = "bold"),
+    axis.text.y = element_text(size = 12, face = "bold"),
+    panel.grid = element_blank()
+  )
+
+print(p_red)
+ggsave(file.path(out_dir, "TileHeatmap_RedSignatures_leadingEdge.png"),
+       p_red, width = 12, height = 3, dpi = 300, bg = "white")
+
+# Blue signature plot
+
+tile_blue <- tile_df %>%
+  filter(pathway %in% blue_sigs) %>%
+  mutate(gene = factor(gene, levels = gene_order),
+         pathway = factor(pathway, levels = blue_sigs))
+
+p_blue <- ggplot(tile_blue, aes(y = pathway, x = gene, fill = contribution)) +
+  geom_tile(color = "grey90") +
+  scale_fill_gradient(low = "white", high = "blue", name = "Contribution") +
+  theme_bw(base_size = 12) +
+  labs(title = "Leading-edge Contributions: Blue Signature",
+       y = "Signature", x = "Gene") +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 10, face = "bold"),
+    axis.text.y = element_text(size = 12, face = "bold"),
+    panel.grid = element_blank()
+  )
+
+print(p_blue)
+ggsave(file.path(out_dir, "Heatmap_BlueSignature_leadingEdge.png"),
+       p_blue, width = 8, height = 2.3, dpi = 300, bg = "white")
+```
+
